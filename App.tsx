@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, MapPin, Sparkles, Send, Info, RefreshCw, Moon, Sun, Crown, Coins, Search, Trophy, TrendingUp, Locate, ExternalLink } from 'lucide-react';
+import { Calendar, Clock, MapPin, Sparkles, Send, Info, RefreshCw, Moon, Sun, Crown, Coins, Search, Trophy, TrendingUp, Locate, ExternalLink, Save, Upload } from 'lucide-react';
 import { calculatePrediction, NAKSHATRAS, getBirdColor, calculateNakshatra, getBird } from './utils/panchaPakshi';
 import { PredictionState, ChatMessage, MoonPhase, Bird, Activity, MatchFormat } from './types';
 import { ResultCard } from './components/ResultCard';
@@ -131,6 +131,39 @@ const App = () => {
     );
     setPrediction(result);
     setAiInsight('');
+  };
+
+  const handleSave = () => {
+    const data = {
+      teamA, teamB, captainA, captainB, dobA, dobB, starA, starB,
+      date, time, tossTime, moonPhase, matchFormat, locationQuery
+    };
+    localStorage.setItem('pp_prediction_data', JSON.stringify(data));
+    alert('Prediction details saved!');
+  };
+
+  const handleLoad = () => {
+    const saved = localStorage.getItem('pp_prediction_data');
+    if (saved) {
+      const data = JSON.parse(saved);
+      setTeamA(data.teamA || '');
+      setTeamB(data.teamB || '');
+      setCaptainA(data.captainA || '');
+      setCaptainB(data.captainB || '');
+      setDobA(data.dobA || '');
+      setDobB(data.dobB || '');
+      setStarA(data.starA || '');
+      setStarB(data.starB || '');
+      setDate(data.date || '');
+      setTime(data.time || '');
+      setTossTime(data.tossTime || '');
+      setMoonPhase(data.moonPhase || MoonPhase.WAXING);
+      setMatchFormat(data.matchFormat || MatchFormat.T20);
+      setLocationQuery(data.locationQuery || '');
+      alert('Prediction details loaded!');
+    } else {
+      alert('No saved data found.');
+    }
   };
 
   const handleGetInsight = async () => {
@@ -411,12 +444,30 @@ const App = () => {
              </div>
           </div>
 
-          <button 
-            onClick={handlePredict}
-            className="w-full bg-gradient-to-r from-mystic-gold to-yellow-600 text-mystic-900 font-bold py-4 rounded-xl shadow-lg hover:shadow-yellow-500/20 hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center justify-center gap-2 text-lg font-serif"
-          >
-            <Sparkles size={20} /> CALCULATE PREDICTION
-          </button>
+          <div className="flex gap-4">
+             <button 
+                onClick={handlePredict}
+                className="flex-1 bg-gradient-to-r from-mystic-gold to-yellow-600 text-mystic-900 font-bold py-4 rounded-xl shadow-lg hover:shadow-yellow-500/20 hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center justify-center gap-2 text-lg font-serif"
+              >
+                <Sparkles size={20} /> CALCULATE PREDICTION
+              </button>
+              
+              <button 
+                onClick={handleSave}
+                title="Save Details"
+                className="bg-mystic-900 border border-slate-600 hover:border-mystic-gold text-slate-300 hover:text-mystic-gold rounded-xl px-4 py-2 transition-all"
+              >
+                <Save size={20} />
+              </button>
+              
+              <button 
+                onClick={handleLoad}
+                title="Load Details"
+                className="bg-mystic-900 border border-slate-600 hover:border-mystic-gold text-slate-300 hover:text-mystic-gold rounded-xl px-4 py-2 transition-all"
+              >
+                <Upload size={20} />
+              </button>
+          </div>
         </section>
 
         {/* Results Display */}
@@ -517,9 +568,19 @@ const App = () => {
 
             {/* Match Flow Timeline */}
             <div className="bg-mystic-900/50 border border-white/5 rounded-xl p-6">
-                <h3 className="text-mystic-gold font-bold uppercase tracking-wider text-sm flex items-center gap-2 mb-6">
-                   <TrendingUp size={16} /> Match Flow ({prediction.matchFormat})
-                </h3>
+                <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-mystic-gold font-bold uppercase tracking-wider text-sm flex items-center gap-2">
+                       <TrendingUp size={16} /> Match Flow ({prediction.matchFormat})
+                    </h3>
+                    <a 
+                      href="https://www.drikpanchang.com/panch-pakshi/panch-pakshi.html" 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="text-[10px] flex items-center gap-1 text-slate-500 hover:text-mystic-gold transition-colors"
+                    >
+                      Verify Timeline <ExternalLink size={10} />
+                    </a>
+                </div>
                 <div className="relative border-l-2 border-slate-700 ml-4 space-y-6">
                    {prediction.matchFlow.map((point, index) => (
                       <div key={index} className="relative pl-6">
