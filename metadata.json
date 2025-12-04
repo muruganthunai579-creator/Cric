@@ -1,0 +1,7 @@
+{
+  "name": "PanchaPakshi CRI-PREDICT",
+  "description": "A Vedic Astrology based Cricket Prediction tool using the ancient Pancha Pakshi (Five Birds) Shastra combined with AI insights.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
