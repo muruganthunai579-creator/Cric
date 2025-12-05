@@ -1,16 +1,57 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { Calendar, Clock, MapPin, Sparkles, Send, Info, RefreshCw, Moon, Sun, Crown, Coins, Search, Trophy, TrendingUp, Locate, ExternalLink, Save, Upload } from 'lucide-react';
+import { Calendar, Clock, MapPin, Sparkles, Send, Info, RefreshCw, Moon, Sun, Crown, Coins, Search, Trophy, TrendingUp, Locate, ExternalLink, Save, Upload, X, Trash2, Users, FolderOpen, PlusCircle } from 'lucide-react';
 import { calculatePrediction, NAKSHATRAS, getBirdColor, calculateNakshatra, getBird } from './utils/panchaPakshi';
-import { PredictionState, ChatMessage, MoonPhase, Bird, Activity, MatchFormat } from './types';
+import { PredictionState, ChatMessage, MoonPhase, Bird, Activity, MatchFormat, GeoLocation, TeamProfile } from './types';
 import { ResultCard } from './components/ResultCard';
 import { getAstrologicalInsight, chatWithAstrologer } from './services/geminiService';
 import { BirdIcon, ActivityIcon } from './components/BirdIcon';
 
-const MAJOR_CITIES = [
-  "Mumbai", "Chennai", "Bangalore", "Kolkata", "Delhi", "Hyderabad", "Ahmedabad", "Pune", "Jaipur", "Lucknow",
-  "London", "Manchester", "Birmingham", "Sydney", "Melbourne", "Perth", "Dubai", "Sharjah", "Colombo", "Karachi", "Lahore"
+const MAJOR_CITIES: { name: string; lat: number; lng: number }[] = [
+  { name: "Mumbai", lat: 19.07, lng: 72.87 },
+  { name: "Chennai", lat: 13.08, lng: 80.27 },
+  { name: "Bangalore", lat: 12.97, lng: 77.59 },
+  { name: "Kolkata", lat: 22.57, lng: 88.36 },
+  { name: "Delhi", lat: 28.70, lng: 77.10 },
+  { name: "Hyderabad", lat: 17.38, lng: 78.48 },
+  { name: "Ahmedabad", lat: 23.02, lng: 72.57 },
+  { name: "Pune", lat: 18.52, lng: 73.85 },
+  { name: "Jaipur", lat: 26.91, lng: 75.78 },
+  { name: "Lucknow", lat: 26.84, lng: 80.94 },
+  { name: "London", lat: 51.50, lng: -0.12 },
+  { name: "Manchester", lat: 53.48, lng: -2.24 },
+  { name: "Birmingham", lat: 52.48, lng: -1.89 },
+  { name: "Sydney", lat: -33.86, lng: 151.20 },
+  { name: "Melbourne", lat: -37.81, lng: 144.96 },
+  { name: "Perth", lat: -31.95, lng: 115.86 },
+  { name: "Dubai", lat: 25.20, lng: 55.27 },
+  { name: "Sharjah", lat: 25.35, lng: 55.40 },
+  { name: "Colombo", lat: 6.92, lng: 79.86 },
+  { name: "Karachi", lat: 24.86, lng: 67.00 },
+  { name: "Lahore", lat: 31.52, lng: 74.35 }
 ];
+
+interface SavedMatchData {
+  id: string;
+  name: string;
+  timestamp: number;
+  data: {
+    teamA: string;
+    teamB: string;
+    captainA: string;
+    captainB: string;
+    dobA: string;
+    dobB: string;
+    starA: string;
+    starB: string;
+    date: string;
+    time: string;
+    tossTime: string;
+    moonPhase: MoonPhase;
+    matchFormat: MatchFormat;
+    locationQuery: string;
+    selectedLocation: GeoLocation;
+  };
+}
 
 const App = () => {
   // Inputs
@@ -33,6 +74,7 @@ const App = () => {
 
   // Location
   const [locationQuery, setLocationQuery] = useState('');
+  const [selectedLocation, setSelectedLocation] = useState<GeoLocation>({ lat: 19.07, lng: 72.87 }); 
   const [showSuggestions, setShowSuggestions] = useState(false);
   const locationRef = useRef<HTMLDivElement>(null);
 
@@ -51,6 +93,22 @@ const App = () => {
   const [inputMsg, setInputMsg] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Match Save/Load Logic
+  const [showLoadModal, setShowLoadModal] = useState(false);
+  const [savedMatches, setSavedMatches] = useState<SavedMatchData[]>([]);
+
+  // Team Library Logic
+  const [savedTeams, setSavedTeams] = useState<TeamProfile[]>([]);
+  const [showTeamModal, setShowTeamModal] = useState<'A' | 'B' | null>(null);
+
+  // Load Saved Teams on Mount
+  useEffect(() => {
+    const loadedTeams = localStorage.getItem('pp_team_library');
+    if (loadedTeams) {
+        setSavedTeams(JSON.parse(loadedTeams));
+    }
+  }, []);
 
   // Auto-Calculate Star from DOB
   useEffect(() => {
@@ -102,8 +160,9 @@ const App = () => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const handleLocationSelect = (city: string) => {
-    setLocationQuery(city);
+  const handleLocationSelect = (cityData: {name: string, lat: number, lng: number}) => {
+    setLocationQuery(cityData.name);
+    setSelectedLocation({ lat: cityData.lat, lng: cityData.lng });
     setShowSuggestions(false);
   };
 
@@ -112,6 +171,7 @@ const App = () => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition((pos) => {
         setLocationQuery(`${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)}`);
+        setSelectedLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       }, () => {
         setLocationQuery("Location access denied");
       });
@@ -123,29 +183,64 @@ const App = () => {
     const dateTime = new Date(`${date}T${time}`);
     const tossDateTime = new Date(`${date}T${tossTime}`);
     
+    // Pass selectedLocation to calculation (Drik Panchang Server Logic)
     const result = calculatePrediction(
         teamA, teamB, 
         { name: captainA || teamA, dob: dobA, star: starA },
         { name: captainB || teamB, dob: dobB, star: starB },
-        dateTime, tossDateTime, moonPhase, matchFormat
+        dateTime, tossDateTime, moonPhase, matchFormat,
+        selectedLocation
     );
     setPrediction(result);
     setAiInsight('');
   };
 
-  const handleSave = () => {
-    const data = {
+  // --- SAVE / LOAD MATCH SYSTEM ---
+
+  const handleSaveMatch = () => {
+    if (!teamA || !teamB) {
+        alert("Please enter Team names before saving.");
+        return;
+    }
+
+    const matchData = {
       teamA, teamB, captainA, captainB, dobA, dobB, starA, starB,
-      date, time, tossTime, moonPhase, matchFormat, locationQuery
+      date, time, tossTime, moonPhase, matchFormat, locationQuery, selectedLocation
     };
-    localStorage.setItem('pp_prediction_data', JSON.stringify(data));
-    alert('Prediction details saved!');
+
+    const newSavedMatch: SavedMatchData = {
+        id: Date.now().toString(),
+        name: `${teamA} vs ${teamB}`,
+        timestamp: Date.now(),
+        data: matchData
+    };
+
+    const existingData = localStorage.getItem('pp_saved_matches');
+    const matches: SavedMatchData[] = existingData ? JSON.parse(existingData) : [];
+    
+    const updatedMatches = [newSavedMatch, ...matches];
+    localStorage.setItem('pp_saved_matches', JSON.stringify(updatedMatches));
+    
+    alert('Match details saved to list!');
   };
 
-  const handleLoad = () => {
-    const saved = localStorage.getItem('pp_prediction_data');
-    if (saved) {
-      const data = JSON.parse(saved);
+  const handleLoadMatch = () => {
+    const existingData = localStorage.getItem('pp_saved_matches');
+    if (existingData) {
+        const matches: SavedMatchData[] = JSON.parse(existingData);
+        if (matches.length > 0) {
+            setSavedMatches(matches);
+            setShowLoadModal(true);
+        } else {
+            alert('No saved matches found.');
+        }
+    } else {
+        alert('No saved matches found.');
+    }
+  };
+
+  const handleSelectMatch = (match: SavedMatchData) => {
+      const { data } = match;
       setTeamA(data.teamA || '');
       setTeamB(data.teamB || '');
       setCaptainA(data.captainA || '');
@@ -160,11 +255,67 @@ const App = () => {
       setMoonPhase(data.moonPhase || MoonPhase.WAXING);
       setMatchFormat(data.matchFormat || MatchFormat.T20);
       setLocationQuery(data.locationQuery || '');
-      alert('Prediction details loaded!');
-    } else {
-      alert('No saved data found.');
-    }
+      if (data.selectedLocation) setSelectedLocation(data.selectedLocation);
+      
+      setShowLoadModal(false);
+      setPrediction(null); 
+      setAiInsight('');
   };
+
+  const handleDeleteMatch = (id: string, e: React.MouseEvent) => {
+      e.stopPropagation(); 
+      const updated = savedMatches.filter(m => m.id !== id);
+      setSavedMatches(updated);
+      localStorage.setItem('pp_saved_matches', JSON.stringify(updated));
+  };
+
+  // --- SAVE / LOAD TEAM PROFILE SYSTEM ---
+
+  const handleSaveTeam = (side: 'A' | 'B') => {
+      const name = side === 'A' ? teamA : teamB;
+      const captain = side === 'A' ? captainA : captainB;
+      const dob = side === 'A' ? dobA : dobB;
+      const star = side === 'A' ? starA : starB;
+
+      if (!name) {
+          alert("Enter Team Name to save.");
+          return;
+      }
+
+      const newTeam: TeamProfile = {
+          id: Date.now().toString(),
+          name, captain, dob, star
+      };
+
+      const updatedTeams = [...savedTeams, newTeam];
+      setSavedTeams(updatedTeams);
+      localStorage.setItem('pp_team_library', JSON.stringify(updatedTeams));
+      alert(`Team ${name} saved to library!`);
+  };
+
+  const handleSelectTeam = (team: TeamProfile, side: 'A' | 'B') => {
+      if (side === 'A') {
+          setTeamA(team.name);
+          setCaptainA(team.captain);
+          setDobA(team.dob);
+          setStarA(team.star);
+      } else {
+          setTeamB(team.name);
+          setCaptainB(team.captain);
+          setDobB(team.dob);
+          setStarB(team.star);
+      }
+      setShowTeamModal(null);
+  };
+
+  const handleDeleteTeam = (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      const updated = savedTeams.filter(t => t.id !== id);
+      setSavedTeams(updated);
+      localStorage.setItem('pp_team_library', JSON.stringify(updated));
+  };
+
+  // --- AI Logic ---
 
   const handleGetInsight = async () => {
     if (!prediction) return;
@@ -233,13 +384,13 @@ const App = () => {
             </div>
             {showSuggestions && (
                 <div className="absolute top-full left-0 w-full mt-1 bg-mystic-800 border border-slate-700 rounded-lg shadow-xl max-h-48 overflow-y-auto z-50">
-                    {MAJOR_CITIES.filter(c => c.toLowerCase().includes(locationQuery.toLowerCase())).map(city => (
+                    {MAJOR_CITIES.filter(c => c.name.toLowerCase().includes(locationQuery.toLowerCase())).map(city => (
                         <div 
-                            key={city} 
+                            key={city.name} 
                             onClick={() => handleLocationSelect(city)}
-                            className="px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 cursor-pointer"
+                            className="px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 cursor-pointer flex justify-between"
                         >
-                            {city}
+                            <span>{city.name}</span>
                         </div>
                     ))}
                 </div>
@@ -248,7 +399,7 @@ const App = () => {
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-8 space-y-8">
+      <main className="max-w-4xl mx-auto px-4 py-8 space-y-8 relative">
         
         {/* Intro */}
         <section className="text-center space-y-2">
@@ -304,9 +455,19 @@ const App = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
             {/* Team A */}
             <div className="space-y-4 bg-mystic-900/30 p-4 rounded-xl border border-white/5 shadow-inner">
-              <h3 className="text-mystic-gold font-bold uppercase tracking-wider text-sm flex items-center gap-2">
-                 Team A
-              </h3>
+              <div className="flex justify-between items-center">
+                  <h3 className="text-mystic-gold font-bold uppercase tracking-wider text-sm flex items-center gap-2">
+                     Team A
+                  </h3>
+                  <div className="flex gap-2">
+                      <button onClick={() => setShowTeamModal('A')} title="Load Team" className="text-slate-400 hover:text-white">
+                          <FolderOpen size={16} />
+                      </button>
+                      <button onClick={() => handleSaveTeam('A')} title="Save Team" className="text-slate-400 hover:text-mystic-gold">
+                          <PlusCircle size={16} />
+                      </button>
+                  </div>
+              </div>
               <div className="space-y-3">
                  <input 
                     type="text" placeholder="Team Name" value={teamA} onChange={(e) => setTeamA(e.target.value)}
@@ -362,9 +523,19 @@ const App = () => {
 
             {/* Team B */}
             <div className="space-y-4 bg-mystic-900/30 p-4 rounded-xl border border-white/5 shadow-inner">
-              <h3 className="text-purple-400 font-bold uppercase tracking-wider text-sm flex items-center gap-2">
-                 Team B
-              </h3>
+              <div className="flex justify-between items-center">
+                  <h3 className="text-purple-400 font-bold uppercase tracking-wider text-sm flex items-center gap-2">
+                     Team B
+                  </h3>
+                  <div className="flex gap-2">
+                      <button onClick={() => setShowTeamModal('B')} title="Load Team" className="text-slate-400 hover:text-white">
+                          <FolderOpen size={16} />
+                      </button>
+                      <button onClick={() => handleSaveTeam('B')} title="Save Team" className="text-slate-400 hover:text-purple-400">
+                          <PlusCircle size={16} />
+                      </button>
+                  </div>
+              </div>
               <div className="space-y-3">
                  <input 
                     type="text" placeholder="Team Name" value={teamB} onChange={(e) => setTeamB(e.target.value)}
@@ -453,22 +624,102 @@ const App = () => {
               </button>
               
               <button 
-                onClick={handleSave}
-                title="Save Details"
-                className="bg-mystic-900 border border-slate-600 hover:border-mystic-gold text-slate-300 hover:text-mystic-gold rounded-xl px-4 py-2 transition-all"
+                onClick={handleSaveMatch}
+                title="Save Match Details"
+                className="bg-mystic-900 border border-slate-600 hover:border-mystic-gold text-slate-300 hover:text-mystic-gold rounded-xl px-4 py-2 transition-all flex items-center gap-2"
               >
                 <Save size={20} />
               </button>
               
               <button 
-                onClick={handleLoad}
-                title="Load Details"
-                className="bg-mystic-900 border border-slate-600 hover:border-mystic-gold text-slate-300 hover:text-mystic-gold rounded-xl px-4 py-2 transition-all"
+                onClick={handleLoadMatch}
+                title="Load Match from List"
+                className="bg-mystic-900 border border-slate-600 hover:border-mystic-gold text-slate-300 hover:text-mystic-gold rounded-xl px-4 py-2 transition-all flex items-center gap-2"
               >
                 <Upload size={20} />
               </button>
           </div>
         </section>
+
+        {/* Saved Matches Modal */}
+        {showLoadModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                <div className="bg-mystic-900 border border-slate-600 rounded-2xl w-full max-w-md max-h-[80vh] flex flex-col shadow-2xl animate-fade-in">
+                    <div className="p-4 border-b border-white/10 flex justify-between items-center">
+                        <h3 className="text-mystic-gold font-serif font-bold text-lg">Saved Matches</h3>
+                        <button onClick={() => setShowLoadModal(false)} className="text-slate-400 hover:text-white">
+                            <X size={20} />
+                        </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                        {savedMatches.length === 0 ? (
+                            <div className="text-center text-slate-500 text-sm py-8">No saved matches found</div>
+                        ) : (
+                            savedMatches.map((match) => (
+                                <div 
+                                    key={match.id} 
+                                    className="bg-slate-800/50 hover:bg-slate-700/50 border border-white/5 rounded-xl p-3 flex justify-between items-center group cursor-pointer transition-all"
+                                    onClick={() => handleSelectMatch(match)}
+                                >
+                                    <div className="flex-1">
+                                        <div className="font-bold text-slate-200 text-sm">{match.name}</div>
+                                        <div className="text-[10px] text-slate-500">{new Date(match.data.date).toLocaleDateString()} • {match.data.matchFormat}</div>
+                                    </div>
+                                    <button 
+                                        onClick={(e) => handleDeleteMatch(match.id, e)}
+                                        className="p-2 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                        title="Delete Match"
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Saved Teams Modal */}
+        {showTeamModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                <div className="bg-mystic-900 border border-slate-600 rounded-2xl w-full max-w-md max-h-[80vh] flex flex-col shadow-2xl animate-fade-in">
+                    <div className="p-4 border-b border-white/10 flex justify-between items-center">
+                        <h3 className="text-mystic-gold font-serif font-bold text-lg flex items-center gap-2">
+                            <Users size={18} /> Select Team {showTeamModal}
+                        </h3>
+                        <button onClick={() => setShowTeamModal(null)} className="text-slate-400 hover:text-white">
+                            <X size={20} />
+                        </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                        {savedTeams.length === 0 ? (
+                            <div className="text-center text-slate-500 text-sm py-8">No saved teams. Save a team first!</div>
+                        ) : (
+                            savedTeams.map((team) => (
+                                <div 
+                                    key={team.id} 
+                                    className="bg-slate-800/50 hover:bg-slate-700/50 border border-white/5 rounded-xl p-3 flex justify-between items-center group cursor-pointer transition-all"
+                                    onClick={() => handleSelectTeam(team, showTeamModal)}
+                                >
+                                    <div className="flex-1">
+                                        <div className="font-bold text-slate-200 text-sm">{team.name}</div>
+                                        <div className="text-[10px] text-slate-500">Cap: {team.captain}</div>
+                                    </div>
+                                    <button 
+                                        onClick={(e) => handleDeleteTeam(team.id, e)}
+                                        className="p-2 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                        title="Delete Team"
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
 
         {/* Results Display */}
         {prediction && (
@@ -565,6 +816,14 @@ const App = () => {
                     />
                 </div>
             </div>
+
+            {/* Show Calculated Sun Times in Results if Prediction Exists */}
+             {prediction && (
+                 <div className="flex justify-center gap-6 text-[10px] text-slate-500 mt-2">
+                     <span className="flex items-center gap-1"><Sun size={10} /> Sunrise: {prediction.sunrise}</span>
+                     <span className="flex items-center gap-1"><Moon size={10} /> Sunset: {prediction.sunset}</span>
+                 </div>
+             )}
 
             {/* Match Flow Timeline */}
             <div className="bg-mystic-900/50 border border-white/5 rounded-xl p-6">

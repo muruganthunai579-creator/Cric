@@ -1,5 +1,4 @@
-
-import { Bird, Activity, MoonPhase, DayTime, PlayerDetails, PredictionState, MatchFormat, FlowPoint, BirdRelation } from '../types';
+import { Bird, Activity, MoonPhase, DayTime, PlayerDetails, PredictionState, MatchFormat, FlowPoint, BirdRelation, GeoLocation } from '../types';
 
 export const NAKSHATRAS = [
   "Aswini", "Bharani", "Krithigai", "Rohini", "Mrigashirsham", 
@@ -55,7 +54,165 @@ const getBirdRelationship = (subject: Bird, ruler: Bird, phase: MoonPhase): Bird
   return BirdRelation.NEUTRAL;
 };
 
-// --- AUTO NAKSHATRA CALCULATION ---
+// --- ASTRONOMICAL CALCULATIONS (SERVER-GRADE) ---
+const toRadians = (deg: number) => deg * Math.PI / 180;
+const toDegrees = (rad: number) => rad * 180 / Math.PI;
+
+const getSunTimes = (date: Date, lat: number, lng: number) => {
+  // Day of year
+  const start = new Date(date.getFullYear(), 0, 0);
+  const diff = date.getTime() - start.getTime();
+  const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+
+  // Fractional year
+  const gamma = (2 * Math.PI / 365) * (dayOfYear - 1 + (12 - 12) / 24);
+
+  // Equation of time
+  const eqTime = 229.18 * (0.000075 + 0.001868 * Math.cos(gamma) - 0.032077 * Math.sin(gamma) - 0.014615 * Math.cos(2 * gamma) - 0.040849 * Math.sin(2 * gamma));
+
+  // Solar declination
+  const decl = 0.006918 - 0.399912 * Math.cos(gamma) + 0.070257 * Math.sin(gamma) - 0.006758 * Math.cos(2 * gamma) + 0.000907 * Math.sin(2 * gamma) - 0.002697 * Math.cos(3 * gamma) + 0.00148 * Math.sin(3 * gamma);
+
+  // Hour angle
+  const haRad = Math.acos(Math.cos(toRadians(90.833)) / (Math.cos(toRadians(lat)) * Math.cos(decl)) - Math.tan(toRadians(lat)) * Math.tan(decl));
+  const haDeg = toDegrees(haRad);
+
+  // Sunrise/Sunset (UTC minutes)
+  const sunriseUTC = 720 - 4 * (lng + haDeg) - eqTime;
+  const sunsetUTC = 720 - 4 * (lng - haDeg) - eqTime;
+
+  // Convert to local time minutes (Approximate based on Timezone offset from date)
+  const offset = -date.getTimezoneOffset(); // in minutes
+  
+  return {
+    sunrise: (sunriseUTC + offset + 1440) % 1440,
+    sunset: (sunsetUTC + offset + 1440) % 1440
+  };
+};
+
+const formatTime = (totalMinutes: number) => {
+  const h = Math.floor(totalMinutes / 60);
+  const m = Math.floor(totalMinutes % 60);
+  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+};
+
+// --- CORE CALCULATOR ---
+const calculateSnapshot = (bird: Bird, date: Date, moonPhase: MoonPhase, lat: number, lng: number) => {
+  const dayIndex = date.getDay();
+  const hour = date.getHours();
+  const minutes = date.getMinutes();
+  const currentTotalMinutes = hour * 60 + minutes;
+
+  // Calculate Precise Sun Times for this Location
+  const { sunrise, sunset } = getSunTimes(date, lat, lng);
+  
+  // Calculate Durations
+  let dayDuration = 0;
+  if (sunset >= sunrise) {
+      dayDuration = sunset - sunrise;
+  } else {
+      // Unusual case, fallback
+      dayDuration = (1440 - sunrise) + sunset;
+  }
+  
+  const nightDuration = 1440 - dayDuration;
+  const dayYamaDuration = dayDuration / 5;
+  const nightYamaDuration = nightDuration / 5;
+
+  let yama = 1;
+  let dayTime = DayTime.DAY;
+
+  // Determine if Day or Night
+  if (currentTotalMinutes >= sunrise && currentTotalMinutes < sunset) {
+    dayTime = DayTime.DAY;
+    const minsSinceSunrise = currentTotalMinutes - sunrise;
+    yama = Math.floor(minsSinceSunrise / dayYamaDuration) + 1;
+  } else {
+    dayTime = DayTime.NIGHT;
+    let minsSinceSunset = 0;
+    if (currentTotalMinutes >= sunset) {
+      minsSinceSunset = currentTotalMinutes - sunset;
+    } else {
+      minsSinceSunset = (1440 - sunset) + currentTotalMinutes;
+    }
+    yama = Math.floor(minsSinceSunset / nightYamaDuration) + 1;
+  }
+  
+  // Cap Yama at 5 (rounding errors)
+  yama = Math.min(Math.max(yama, 1), 5);
+
+  // Get Ruling Bird
+  const rulingBird = getRulingBirdForYama(dayIndex, dayTime === DayTime.NIGHT, moonPhase, yama);
+  
+  // Get Subject Activity
+  const startAct = getStartActivity(bird, dayIndex, dayTime === DayTime.NIGHT, moonPhase);
+  const currentAct = getActivityForYama(startAct, yama, moonPhase);
+  
+  // Base Power
+  let power = activityPower[currentAct];
+
+  // Relationship Modifiers
+  const relation = getBirdRelationship(bird, rulingBird, moonPhase);
+  
+  if (relation === BirdRelation.SELF) {
+    power += 20; 
+  } else if (relation === BirdRelation.FRIEND) {
+    power += 10; 
+  } else if (relation === BirdRelation.ENEMY) {
+    power -= 10; 
+  }
+
+  return { activity: currentAct, power, yama, dayTime, rulingBird, relation, sunrise, sunset };
+};
+
+// --- MATCH FLOW GENERATOR ---
+const generateMatchFlow = (
+  birdA: Bird, birdB: Bird, 
+  startDate: Date, moonPhase: MoonPhase, 
+  format: MatchFormat, 
+  teamA: string, teamB: string,
+  lat: number, lng: number
+): FlowPoint[] => {
+  const flow: FlowPoint[] = [];
+  const durationMinutes = format === MatchFormat.T20 ? 240 : 480; 
+  const interval = 30; 
+
+  for (let m = 0; m <= durationMinutes; m += interval) {
+    const pointTime = new Date(startDate.getTime() + m * 60000);
+    const snapA = calculateSnapshot(birdA, pointTime, moonPhase, lat, lng);
+    const snapB = calculateSnapshot(birdB, pointTime, moonPhase, lat, lng);
+
+    let dominant = 'Draw';
+    let pA = snapA.power;
+    let pB = snapB.power;
+
+    // Ruling Bird Dominance Logic
+    if (snapA.rulingBird === birdA && snapB.rulingBird !== birdB) pA += 30; 
+    if (snapB.rulingBird === birdB && snapA.rulingBird !== birdA) pB += 30;
+
+    // Tie-breaker
+    if (Math.abs(pA - pB) < 5) {
+        const actRank = { [Activity.RULE]: 5, [Activity.EAT]: 4, [Activity.WALK]: 3, [Activity.SLEEP]: 2, [Activity.DIE]: 1 };
+        if (actRank[snapA.activity] > actRank[snapB.activity]) pA += 1;
+        if (actRank[snapB.activity] > actRank[snapA.activity]) pB += 1;
+    }
+
+    if (pA > pB) dominant = teamA;
+    if (pB > pA) dominant = teamB;
+
+    flow.push({
+      time: pointTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      teamA_Power: pA,
+      teamB_Power: pB,
+      dominantTeam: dominant,
+      activityA: snapA.activity,
+      activityB: snapB.activity
+    });
+  }
+  return flow;
+};
+
+// --- BIRD MAPPING HELPERS ---
 export const calculateNakshatra = (dateStr: string): string => {
   if (!dateStr) return "";
   try {
@@ -77,27 +234,22 @@ export const calculateNakshatra = (dateStr: string): string => {
   }
 };
 
-// --- BIRD DETERMINATION (Pages 17 & 30) ---
 const getBirdByStar = (starIndex: number, phase: MoonPhase): Bird => {
-  const group1 = [0, 1, 2, 3, 4]; // Aswini - Mrigashirsham
-  const group2 = [5, 6, 7, 8, 9, 10]; // Thiruvathirai - Pooram
-  const group3 = [11, 12, 13, 14, 15]; // Uthiram - Visakam
-  const group4 = [16, 17, 18, 19, 20]; // Anusham - Uthiradam
-  const group5 = [21, 22, 23, 24, 25, 26]; // Thiruvonam - Revathi
-
+  const groups = [
+    [0, 1, 2, 3, 4], [5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20], [21, 22, 23, 24, 25, 26]
+  ];
   if (phase === MoonPhase.WAXING) {
-    if (group1.includes(starIndex)) return Bird.VULTURE;
-    if (group2.includes(starIndex)) return Bird.OWL;
-    if (group3.includes(starIndex)) return Bird.CROW;
-    if (group4.includes(starIndex)) return Bird.COCK;
-    if (group5.includes(starIndex)) return Bird.PEACOCK;
+    if (groups[0].includes(starIndex)) return Bird.VULTURE;
+    if (groups[1].includes(starIndex)) return Bird.OWL;
+    if (groups[2].includes(starIndex)) return Bird.CROW;
+    if (groups[3].includes(starIndex)) return Bird.COCK;
+    if (groups[4].includes(starIndex)) return Bird.PEACOCK;
   } else {
-    // Thei Pirai Mapping (Page 30)
-    if (group5.includes(starIndex)) return Bird.VULTURE; 
-    if (group4.includes(starIndex)) return Bird.OWL;     
-    if (group3.includes(starIndex)) return Bird.CROW;    
-    if (group2.includes(starIndex)) return Bird.COCK;    
-    if (group1.includes(starIndex)) return Bird.PEACOCK; 
+    if (groups[4].includes(starIndex)) return Bird.VULTURE; 
+    if (groups[3].includes(starIndex)) return Bird.OWL;     
+    if (groups[2].includes(starIndex)) return Bird.CROW;    
+    if (groups[1].includes(starIndex)) return Bird.COCK;    
+    if (groups[0].includes(starIndex)) return Bird.PEACOCK; 
   }
   return Bird.VULTURE;
 };
@@ -105,13 +257,10 @@ const getBirdByStar = (starIndex: number, phase: MoonPhase): Bird => {
 const getBirdByName = (name: string, phase: MoonPhase): Bird => {
   if (!name) return Bird.VULTURE;
   const char = name.trim().toLowerCase()[0];
-  
   const isA = (c: string) => ['a'].includes(c);
   const isI = (c: string) => ['i', 'l', 'r'].includes(c);
   const isU = (c: string) => ['u', 'k'].includes(c);
   const isE = (c: string) => ['e', 'm', 't'].includes(c);
-  const isO = (c: string) => ['o', 'n', 'p', 's'].includes(c);
-
   if (phase === MoonPhase.WAXING) {
      if (isA(char)) return Bird.VULTURE;
      if (isI(char)) return Bird.OWL;
@@ -135,69 +284,61 @@ export const getBird = (details: PlayerDetails, phase: MoonPhase): Bird => {
   return getBirdByName(details.name, phase);
 };
 
-// --- COLOR MAPPING (Pages 19 & 32) ---
 export const getBirdColor = (bird: Bird, phase: MoonPhase): string => {
   if (phase === MoonPhase.WAXING) {
     switch(bird) {
-      case Bird.VULTURE: return "text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.5)]"; // Pon (Gold)
-      case Bird.OWL: return "text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]"; // Vellai (White)
-      case Bird.CROW: return "text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]"; // Sivappu (Red)
-      case Bird.COCK: return "text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]"; // Pachai (Green)
-      case Bird.PEACOCK: return "text-gray-900 bg-slate-200 px-1 rounded shadow-inner"; // Karuppu (Black)
+      case Bird.VULTURE: return "text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.5)]";
+      case Bird.OWL: return "text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]";
+      case Bird.CROW: return "text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]";
+      case Bird.COCK: return "text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]";
+      case Bird.PEACOCK: return "text-gray-900 bg-slate-200 px-1 rounded shadow-inner";
     }
   } else {
     switch(bird) {
-      case Bird.VULTURE: return "text-gray-900 bg-slate-200 px-1 rounded shadow-inner"; // Karuppu
-      case Bird.OWL: return "text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]"; // Sigappu
-      case Bird.CROW: return "text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.5)]"; // Pon
-      case Bird.COCK: return "text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]"; // Vellai
-      case Bird.PEACOCK: return "text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]"; // Pachai
+      case Bird.VULTURE: return "text-gray-900 bg-slate-200 px-1 rounded shadow-inner";
+      case Bird.OWL: return "text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]";
+      case Bird.CROW: return "text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.5)]";
+      case Bird.COCK: return "text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]";
+      case Bird.PEACOCK: return "text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]";
     }
   }
   return "text-gray-200";
 };
 
-// --- START ACTIVITY TABLES (Based on Pages 25-29 & 38-42) ---
-// Returns the Starting Activity for [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+// ... Start Activity Tables (Same as before, ensuring strict book compliance) ...
 const getStartSequence = (bird: Bird, isNight: boolean, phase: MoonPhase): Activity[] => {
   const { RULE, EAT, WALK, SLEEP, DIE } = Activity;
   const { VULTURE, OWL, CROW, COCK, PEACOCK } = Bird;
-
   if (phase === MoonPhase.WAXING) {
     if (!isNight) {
-      // Day (Valar)
-      if (bird === VULTURE) return [EAT, DIE, EAT, DIE, SLEEP, RULE, WALK]; // Pg 25 Day
-      if (bird === OWL)     return [WALK, EAT, WALK, EAT, DIE, SLEEP, RULE]; // Pg 26 Day
-      if (bird === CROW)    return [RULE, WALK, RULE, WALK, EAT, DIE, SLEEP]; // Pg 27 Day
-      if (bird === COCK)    return [SLEEP, RULE, SLEEP, RULE, WALK, EAT, DIE]; // Pg 28 Day
-      if (bird === PEACOCK) return [DIE, SLEEP, DIE, SLEEP, RULE, WALK, EAT]; // Pg 29 Day
+      if (bird === VULTURE) return [EAT, DIE, EAT, DIE, SLEEP, RULE, WALK];
+      if (bird === OWL)     return [WALK, EAT, WALK, EAT, DIE, SLEEP, RULE];
+      if (bird === CROW)    return [RULE, WALK, RULE, WALK, EAT, DIE, SLEEP];
+      if (bird === COCK)    return [SLEEP, RULE, SLEEP, RULE, WALK, EAT, DIE];
+      if (bird === PEACOCK) return [DIE, SLEEP, DIE, SLEEP, RULE, WALK, EAT];
     } else {
-      // Night (Valar)
-      if (bird === VULTURE) return [DIE, WALK, DIE, WALK, SLEEP, EAT, RULE]; // Pg 25 Night
-      if (bird === OWL)     return [RULE, DIE, RULE, DIE, WALK, SLEEP, EAT]; // Pg 26 Night
-      if (bird === CROW)    return [EAT, RULE, EAT, RULE, DIE, WALK, SLEEP]; // Pg 27 Night
-      if (bird === COCK)    return [SLEEP, EAT, SLEEP, EAT, RULE, DIE, WALK]; // Pg 28 Night
-      if (bird === PEACOCK) return [WALK, SLEEP, WALK, SLEEP, EAT, RULE, DIE]; // Pg 29 Night
+      if (bird === VULTURE) return [DIE, WALK, DIE, WALK, SLEEP, EAT, RULE];
+      if (bird === OWL)     return [RULE, DIE, RULE, DIE, WALK, SLEEP, EAT];
+      if (bird === CROW)    return [EAT, RULE, EAT, RULE, DIE, WALK, SLEEP];
+      if (bird === COCK)    return [SLEEP, EAT, SLEEP, EAT, RULE, DIE, WALK];
+      if (bird === PEACOCK) return [WALK, SLEEP, WALK, SLEEP, EAT, RULE, DIE];
     }
   } else {
-    // Krishna Paksha (Thei Pirai)
     if (!isNight) {
-      // Day (Thei) - Pg 38-42
-      if (bird === VULTURE) return [WALK, SLEEP, WALK, DIE, RULE, EAT, SLEEP]; // Pg 38 Day
-      if (bird === OWL)     return [DIE, WALK, DIE, RULE, EAT, DIE, WALK];     // Pg 39 Day 
-      if (bird === CROW)    return [RULE, DIE, RULE, EAT, WALK, SLEEP, DIE]; // Pg 40
-      if (bird === COCK)    return [EAT, RULE, EAT, SLEEP, DIE, WALK, RULE]; // Pg 41
-      if (bird === PEACOCK) return [SLEEP, EAT, SLEEP, WALK, SLEEP, RULE, EAT]; // Pg 42
+      if (bird === VULTURE) return [WALK, SLEEP, WALK, DIE, RULE, EAT, SLEEP];
+      if (bird === OWL)     return [DIE, WALK, DIE, RULE, EAT, DIE, WALK];
+      if (bird === CROW)    return [RULE, DIE, RULE, EAT, WALK, SLEEP, DIE];
+      if (bird === COCK)    return [EAT, RULE, EAT, SLEEP, DIE, WALK, RULE];
+      if (bird === PEACOCK) return [SLEEP, EAT, SLEEP, WALK, SLEEP, RULE, EAT];
     } else {
-      // Night (Thei)
       if (bird === VULTURE) return [EAT, WALK, EAT, WALK, SLEEP, DIE, RULE];
-      if (bird === OWL)     return [EAT, WALK, EAT, WALK, SLEEP, DIE, RULE]; // Note: Table overlap logic
+      if (bird === OWL)     return [EAT, WALK, EAT, WALK, SLEEP, DIE, RULE];
       if (bird === CROW)    return [RULE, SLEEP, RULE, SLEEP, EAT, WALK, SLEEP];
       if (bird === COCK)    return [SLEEP, EAT, SLEEP, EAT, RULE, DIE, WALK];
       if (bird === PEACOCK) return [DIE, RULE, DIE, RULE, WALK, SLEEP, EAT];
     }
   }
-  return [RULE, RULE, RULE, RULE, RULE, RULE, RULE]; // Fallback
+  return [RULE, RULE, RULE, RULE, RULE, RULE, RULE];
 };
 
 const getStartActivity = (bird: Bird, dayIndex: number, isNight: boolean, phase: MoonPhase): Activity => {
@@ -223,111 +364,24 @@ const getRulingBirdForYama = (dayIndex: number, isNight: boolean, moonPhase: Moo
   return Bird.VULTURE; 
 };
 
-// --- CORE CALCULATOR ---
-const calculateSnapshot = (bird: Bird, date: Date, moonPhase: MoonPhase) => {
-  const dayIndex = date.getDay();
-  const hour = date.getHours();
-  const minutes = date.getMinutes();
-  const totalMinutes = hour * 60 + minutes;
-
-  let yama = 1;
-  let dayTime = DayTime.DAY;
-
-  // Standard 6 AM - 6 PM cycle
-  const dayStart = 360; // 6:00 AM
-  const dayEnd = 1080; // 6:00 PM
-  const yamaDuration = 144; // 2h 24m
-
-  if (totalMinutes >= dayStart && totalMinutes < dayEnd) {
-    dayTime = DayTime.DAY;
-    const minsSinceStart = totalMinutes - dayStart;
-    yama = Math.min(Math.floor(minsSinceStart / yamaDuration) + 1, 5);
-  } else {
-    dayTime = DayTime.NIGHT;
-    let minsSinceStart = 0;
-    if (totalMinutes >= dayEnd) {
-      minsSinceStart = totalMinutes - dayEnd;
-    } else {
-      minsSinceStart = totalMinutes + (1440 - dayEnd); 
-    }
-    yama = Math.min(Math.floor(minsSinceStart / yamaDuration) + 1, 5);
-  }
-
-  // Get Ruling Bird
-  const rulingBird = getRulingBirdForYama(dayIndex, dayTime === DayTime.NIGHT, moonPhase, yama);
-  
-  // Get Subject Activity
-  const startAct = getStartActivity(bird, dayIndex, dayTime === DayTime.NIGHT, moonPhase);
-  const currentAct = getActivityForYama(startAct, yama, moonPhase);
-  
-  // Base Power
-  let power = activityPower[currentAct];
-
-  // Relationship Modifiers
-  const relation = getBirdRelationship(bird, rulingBird, moonPhase);
-  
-  if (relation === BirdRelation.SELF) {
-    power += 20; 
-  } else if (relation === BirdRelation.FRIEND) {
-    power += 10; 
-  } else if (relation === BirdRelation.ENEMY) {
-    power -= 10; 
-  }
-
-  return { activity: currentAct, power, yama, dayTime, rulingBird, relation };
-};
-
-// --- MATCH FLOW GENERATOR ---
-const generateMatchFlow = (
-  birdA: Bird, birdB: Bird, 
-  startDate: Date, moonPhase: MoonPhase, 
-  format: MatchFormat, 
-  teamA: string, teamB: string
-): FlowPoint[] => {
-  const flow: FlowPoint[] = [];
-  const durationMinutes = format === MatchFormat.T20 ? 240 : 480; 
-  const interval = 30; 
-
-  for (let m = 0; m <= durationMinutes; m += interval) {
-    const pointTime = new Date(startDate.getTime() + m * 60000);
-    const snapA = calculateSnapshot(birdA, pointTime, moonPhase);
-    const snapB = calculateSnapshot(birdB, pointTime, moonPhase);
-
-    let dominant = 'Draw';
-    if (snapA.power > snapB.power) dominant = teamA;
-    if (snapB.power > snapA.power) dominant = teamB;
-
-    flow.push({
-      time: pointTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      teamA_Power: snapA.power,
-      teamB_Power: snapB.power,
-      dominantTeam: dominant,
-      activityA: snapA.activity,
-      activityB: snapB.activity
-    });
-  }
-  return flow;
-};
-
-// --- MAIN PREDICTION ---
+// --- EXPORT ---
 export const calculatePrediction = (
   teamA: string, teamB: string, 
   captainA: PlayerDetails, captainB: PlayerDetails,
   date: Date, tossDate: Date, 
   moonPhase: MoonPhase,
-  matchFormat: MatchFormat
+  matchFormat: MatchFormat,
+  location: GeoLocation
 ): PredictionState => {
   
   const birdA = getBird(captainA, moonPhase);
   const birdB = getBird(captainB, moonPhase);
 
-  // Match Prediction
-  const matchSnapA = calculateSnapshot(birdA, date, moonPhase);
-  const matchSnapB = calculateSnapshot(birdB, date, moonPhase);
+  const matchSnapA = calculateSnapshot(birdA, date, moonPhase, location.lat, location.lng);
+  const matchSnapB = calculateSnapshot(birdB, date, moonPhase, location.lat, location.lng);
 
-  // Toss Prediction
-  const tossSnapA = calculateSnapshot(birdA, tossDate, moonPhase);
-  const tossSnapB = calculateSnapshot(birdB, tossDate, moonPhase);
+  const tossSnapA = calculateSnapshot(birdA, tossDate, moonPhase, location.lat, location.lng);
+  const tossSnapB = calculateSnapshot(birdB, tossDate, moonPhase, location.lat, location.lng);
   
   let tossWinner = 'Draw';
   if (tossSnapA.power > tossSnapB.power) tossWinner = teamA;
@@ -336,13 +390,12 @@ export const calculatePrediction = (
     tossWinner = birdsOrder.indexOf(birdA) < birdsOrder.indexOf(birdB) ? teamA : teamB;
   }
 
-  // Match Winner
   let winner = 'Draw';
   if (matchSnapA.power > matchSnapB.power) winner = teamA;
   if (matchSnapB.power > matchSnapA.power) winner = teamB;
   
   const dayIndex = date.getDay();
-  const matchFlow = generateMatchFlow(birdA, birdB, date, moonPhase, matchFormat, teamA, teamB);
+  const matchFlow = generateMatchFlow(birdA, birdB, date, moonPhase, matchFormat, teamA, teamB, location.lat, location.lng);
 
   return {
     teamA, teamB, captainA, captainB, birdA, birdB,
@@ -366,5 +419,8 @@ export const calculatePrediction = (
     relationB: matchSnapB.relation,
     tossRelationA: tossSnapA.relation,
     tossRelationB: tossSnapB.relation,
+    location: `${location.lat.toFixed(2)}, ${location.lng.toFixed(2)}`,
+    sunrise: formatTime(matchSnapA.sunrise),
+    sunset: formatTime(matchSnapA.sunset)
   };
 };

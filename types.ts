@@ -1,4 +1,3 @@
-
 export enum Bird {
   VULTURE = 'Valluru (Vulture)',
   OWL = 'Aandhai (Owl)',
@@ -37,10 +36,23 @@ export enum BirdRelation {
   NEUTRAL = 'Neutral'
 }
 
+export interface GeoLocation {
+  lat: number;
+  lng: number;
+}
+
 export interface PlayerDetails {
   name: string;
   dob: string;
   star: string; // Nakshatra
+}
+
+export interface TeamProfile {
+  id: string;
+  name: string;
+  captain: string;
+  dob: string;
+  star: string;
 }
 
 export interface FlowPoint {
@@ -75,11 +87,14 @@ export interface PredictionState {
   tossActivityB: Activity;
   matchFlow: FlowPoint[];
   matchFormat: MatchFormat;
-  // New fields for Book Based Relationships
   relationA: BirdRelation;
   relationB: BirdRelation;
   tossRelationA: BirdRelation;
   tossRelationB: BirdRelation;
+  // Location & Astronomical Data
+  location: string;
+  sunrise: string;
+  sunset: string;
 }
 
 export interface ChatMessage {
